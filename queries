@@ -1,0 +1,71 @@
+-- 1- Raio-X da Carteira de Crédito: Qual é o volume total (em R$) de crédito concedido (valor principal) por tipo de produto? Ordene do maior para o menor.
+select pf.tipo_produto, sum(valor_principal) as volume_total_R$ from contratos_credito cc
+
+join produtos_financeiros pf on cc.id_produto = pf.id_produto
+
+group by pf.tipo_produto
+order by sum(valor_principal) desc;
+
+
+-- 2- Perfil de Renda: Qual é a renda média declarada dos clientes, agrupada por tipo_pessoa (PF vs PJ)?
+select tipo_pessoa, 
+round(avg(renda_declarada), 2) as renda_media
+from clientes
+
+where renda_declarada is not null
+
+group by tipo_pessoa;
+
+
+-- 3- Engajamento de Contas: Liste o nome dos clientes, o tipo de conta, o saldo atual e a quantidade de transações que cada conta já realizou. Inclua contas que não possuem transações.
+select c.nome, ct.tipo_conta, ct.saldo_atual, count(ts.id_transacao) as qtde_transacoes 
+from clientes c
+
+join contas ct on c.id_cliente = ct.id_cliente
+left join transacoes ts on ct.id_conta = ts.id_conta
+
+group by  c.nome, ct.id_conta, ct.tipo_conta, ct.saldo_atual
+order by c.nome;
+
+
+-- 4- Performance Comercial: Quais são os 3 funcionários (gerentes) que mais aprovaram valor em contratos de crédito? Mostre o nome, a agência e o volume total aprovado.
+select f.nome, a.nome_agencia, sum(cc.valor_principal) as total_aprovado from funcionarios f
+
+join agencias a on f.id_agencia = a.id_agencia
+join contratos_credito cc on f.id_funcionario = cc.id_funcionario
+
+WHERE LOWER(f.cargo) LIKE '%gerente%'
+
+group by f.id_funcionario, f.nome, a.nome_agencia
+order by total_aprovado  desc
+limit 3;
+
+-- 5- Visão de Risco Básica: Quantos contratos ativos estão classificados como 'Inadimplente' e qual a soma do valor principal atrelado a eles?
+select count(cc.id_contrato) as qtdeContratos, sum(cc.valor_principal) from contratos_credito cc 
+
+where status_contrato = 'Inadimplente';
+
+
+-- 6- Indicador de Inadimplência Bruta: Qual o percentual de parcelas atrasadas em relação ao total de parcelas geradas no banco? 
+select round(sum(case when p.status_parcela = 'Atrasada' then 1 else 0 end)
+ /
+nullif(count(p.id_parcela), 0) * 100.00, 2) as percentual
+ from parcelas p;
+ 
+ 
+-- 7- Score de Comprometimento de Renda: Para clientes pessoa física (PF), calcule o valor total de suas parcelas (somando todos os contratos ativos) e divida pela sua renda declarada para encontrar o "% de comprometimento mensal".
+--  Liste os clientes que têm mais de 30% da renda comprometida.
+select c.nome, substr(pl.data_vencimento, 1, 7) as ano_mes,
+round(sum(pl.valor_parcela) * 100.00
+ /
+ nullif(c.renda_declarada, 0), 2)  as total_mes
+from clientes c
+
+join contratos_credito cc on c.id_cliente = cc.id_cliente
+join parcelas pl on cc.id_contrato = pl.id_contrato
+
+where c.tipo_pessoa = 'PF'
+and cc.status_contrato = 'Ativo'
+
+group by c.id_cliente, c.nome, substr(pl.data_vencimento, 1, 7), c.renda_declarada
+having total_mes > 30.0
