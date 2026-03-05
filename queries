@@ -69,3 +69,121 @@ and cc.status_contrato = 'Ativo'
 
 group by c.id_cliente, c.nome, substr(pl.data_vencimento, 1, 7), c.renda_declarada
 having total_mes > 30.0
+
+
+
+-- 8- Análise de Faturas vs Saldo: Encontre os clientes cujas faturas de cartão de crédito estão com o status Fechada_Atrasada e verifique qual é o saldo atual de suas contas correntes correspondentes.
+
+select distinct cl.nome, c.saldo_atual from clientes cl
+
+join contas c on cl.id_cliente = c.id_cliente
+join cartoes ct on cl.id_cliente= ct.id_cliente 
+join faturas_cartao fc on ct.id_cartao = fc.id_cartao 
+
+where fc.status_fatura = 'Fechada_Atrasada' 
+and c.tipo_conta = 'Corrente';
+
+
+-- 9- Segmentação de Clientes (Tiers): Classifique todos os clientes nas categorias A, B ou C usando um CASE STATEMENT baseado na soma do saldo das suas contas + o limite total de seus cartões de crédito. 
+-- (> R$100k = A, entre R$20k e R$100k = B, < R$20k = C).
+
+with total_conta as (
+select c.id_cliente, c.nome, sum(co.saldo_atual)  as total_co
+from clientes c
+left join contas co on c.id_cliente = co.id_cliente
+
+group by c.id_cliente, c.nome
+),
+
+total_cartao as (
+    select c.id_cliente, sum(c.limite_credito) as total_li
+    from cartoes c
+    group by c.id_cliente
+)
+
+select tc.id_cliente, tc.nome, tc.total_co + coalesce(tct.total_li, 0) as total,
+case
+when tc.total_co + coalesce(tct.total_li, 0) < 20000 then 'C'
+when tc.total_co + coalesce(tct.total_li, 0) >= 20000 and tc.total_co + coalesce(tct.total_li, 0) <= 100000 then 'B'
+else 'A'
+end as classificacao
+from total_conta tc
+
+left join total_cartao tct on tc.id_cliente = tct.id_cliente
+
+order by total asc;
+
+-- 10 -Comportamento Transacional de Crédito vs Débito: Descubra qual cliente pessoa jurídica (PJ) teve a maior diferença absoluta entre transações de "Crédito" e "Débito" (Entradas - Saídas) em todo o histórico de transações.
+select c.nome, 
+abs(
+sum(case when tipo_movimento = 'Credito' then valor else 0 end)
+-
+sum(case when tipo_movimento = 'Debito' then valor else 0 end)) as total_abs
+from clientes c
+
+join contas ct on c.id_cliente = ct.id_cliente
+join transacoes t on ct.id_conta = t.id_conta 
+
+where c.tipo_pessoa = 'PJ'
+
+group by c.id_cliente, c.nome
+order by total_abs desc
+limit 1;
+
+-- 11- Análise de Safra (Cohort de Originação): Considerando a data de contratação de crédito, agrupe os contratos por mês e ano (Safra).
+--  Para cada safra, mostre o volume total concedido e use a função LAG() para calcular a variação percentual de crescimento (ou queda) em relação ao mês anterior.
+
+with soma as (
+select substr(data_contratacao,1, 7) as data, sum(valor_principal) as total
+ from contratos_credito
+ 
+ group by substr(data_contratacao,1, 7)
+ )
+ 
+ select *,
+ round((total - (lag(total) over (order by data asc)))
+  / nullif(lag(total) over (order by data asc),0) * 100.00, 2)
+ from soma;
+
+
+-- 12- Rolling Average de Transações: Para a conta do cliente "Tech Solutions Ltda", calcule a média móvel (rolling average) do valor transacionado (apenas transações de Crédito) 
+-- usando as últimas 3 transações de forma cronológica, exibindo linha a linha usando window functions.
+select c.nome, t.data_hora_transacao, t.valor,
+round(avg(valor) over (partition by ct.id_conta order by data_hora_transacao asc ROWS BETWEEN 2 PRECEDING AND CURRENT ROW),2) as rolling_average
+ from clientes c
+
+join contas ct on c.id_cliente = ct.id_cliente 
+join transacoes t on ct.id_conta = t.id_conta
+
+where c.id_cliente = 3
+and t.tipo_movimento = 'Credito';
+
+-- 13- Identificação de "Risco de Fuga" (Churn Risk): Identifique os clientes que possuem um limite de cartão de crédito alto (acima da média geral do banco),
+--  mas que o saldo de suas faturas nos últimos 2 meses registrados foi menor que 10% do seu limite disponível. (Exige CTEs e cruzamento entre faturas e limites).
+
+with media_banco  as (
+select round(avg(limite_credito),2) as media_geral from cartoes 
+),
+
+por_mes as (
+select c.id_cliente, c.nome, fc.valor_total, substr(fc.data_vencimento, 1, 7), ct.limite_credito,
+row_number() over (partition by c.id_cliente order by fc.data_vencimento desc) as ranke
+ from  clientes c
+join cartoes ct on c.id_cliente = ct.id_cliente
+join faturas_cartao fc on ct.id_cartao = fc.id_cartao
+),
+
+soma_parcelas as (
+select id_cliente, nome, limite_credito,
+sum(valor_total) as total
+ from por_mes
+
+where ranke <=2
+
+GROUP BY id_cliente, nome, limite_credito
+)
+
+select * from soma_parcelas, media_banco
+
+where limite_credito > media_geral
+and total < (limite_credito * 0.10);
