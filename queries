@@ -187,3 +187,180 @@ select * from soma_parcelas, media_banco
 
 where limite_credito > media_geral
 and total < (limite_credito * 0.10);
+
+-- 14- Tempo até a Primeira Falha (Time-to-Default): Calcule a média de dias que os contratos que estão atualmente 'Inadimplentes' levaram entre a data_contratacao e a data da primeira parcela com status 'Atrasada'. 
+-- (Exige encontrar a data mínima de atraso por contrato).
+
+with contratacao as (
+select cc.id_contrato, cc.data_contratacao as datas from contratos_credito cc
+
+where cc.status_contrato = 'Inadimplente'
+),
+
+primeiro_atraso as (
+select cc.id_contrato, min(p.data_vencimento) datas_p from contratos_credito cc
+
+join parcelas p on cc.id_contrato = p.id_contrato
+
+where p.status_parcela = 'Atrasada'
+
+group by cc.id_contrato
+),
+
+calculo_dias as (
+select cc.id_contrato, datediff(p.datas_p, cc.datas) as dias from contratacao cc
+join primeiro_atraso p on cc.id_contrato = p.id_contrato
+)
+
+select 
+round(avg(dias), 2) as dias
+ from calculo_dias;
+ 
+ 
+-- 15- Curva ABC (Pareto) de Receita de Cartões: Identifique os clientes que geram a maior receita de cartão (valor da fatura). Usando window functions, calcule a soma acumulada percentual (% Acumulado) das faturas geradas,
+--  ordenando do maior para o menor gerador, para provar se a regra 80/20 se aplica a este portfólio de cartões.
+
+with soma_total as (
+select c.id_cliente, 
+sum(fc.valor_total) as total
+ from faturas_cartao fc
+ 
+ join cartoes ct on fc.id_cartao = ct.id_cartao
+ join clientes c on ct.id_cliente = c.id_cliente
+ 
+ group by c.id_cliente
+ ),
+ 
+ acumulado as (
+select id_cliente, total,
+sum(total) over (order by total desc) as acumulado,
+sum(total) over () as total_geral
+ from soma_total 
+)
+
+select id_cliente, total, acumulado,
+round((acumulado / total_geral) * 100.00, 2) as percentual_acumulado
+ from acumulado;
+
+-- 16. Auditoria de Compliance (Inconsistências):
+-- A área de risco detectou uma possível falha de sistema. Liste os clientes que possuem a conta corrente com o status_conta igual a 'Bloqueada' ou 'Inativa', 
+-- mas que ainda possuem faturas de cartão de crédito com o status 'Aberta'. Retorne o nome do cliente, o status da conta e o valor da fatura.
+
+select 
+c.nome,
+ct.status_conta,
+fc.valor_total
+ from clientes c
+
+join contas ct 
+on c.id_cliente = ct.id_cliente
+
+join cartoes cts 
+on ct.id_conta = cts.id_conta
+
+join faturas_cartao fc 
+on cts.id_cartao = fc.id_cartao
+
+where 
+(ct.tipo_conta = 'Corrente')
+and
+(fc.status_fatura = 'Aberta') 
+and 
+ct.status_conta in('Bloqueada', 'Inativa');
+
+
+-- 17. Conversão de Onboarding (Time-to-Credit):
+-- Queremos saber quão rápido os clientes novos tomam crédito. Calcule o percentual de clientes que contrataram seu primeiro empréstimo (qualquer produto em contratos_credito) em até 30 dias após a data_abertura de suas contas.
+
+with clientes30dias as (
+select c.nome,
+datediff(min(cc.data_contratacao), min(ct.data_abertura)) as dias
+ from clientes c 
+
+join contas ct on c.id_cliente = ct.id_cliente
+join contratos_credito cc on ct.id_conta = cc.id_conta
+
+group by c.id_cliente, c.nome
+)
+
+select 
+sum(case when dias <= 30 then 1 else 0 end) * 100.0 / count(*)
+ from  clientes30dias;
+ 
+ 
+--  18. Clientes "Superavitários" (Garantia Natural):
+-- Encontre os clientes cujo saldo em conta corrente/poupança (saldo_atual) é maior do que a soma de toda a sua dívida pendente (soma das parcelas com status 'Pendente' ou 'Atrasada'). 
+-- Liste o nome, o saldo total em conta e o saldo devedor.
+
+with dividas_clientes as (
+select c.id_cliente, c.nome, sum(p.valor_parcela) as dividas 
+ from clientes c
+
+join contratos_credito cc on c.id_cliente = cc.id_cliente
+join parcelas p on cc.id_contrato = p.id_contrato
+
+where p.status_parcela in ('Pendente', 'Atrasada')
+group by c.id_cliente, c.nome
+), 
+
+total_saldo as (
+select c.id_cliente, c.nome, sum(ct.saldo_atual) as saldo
+
+ from clientes c
+
+join contas ct on c.id_cliente = ct.id_cliente
+
+
+where ct.tipo_conta in ('Corrente', 'Poupanca')
+
+group by c.id_cliente, c.nome
+)
+
+select ts.nome, ts.saldo, dc.dividas
+ from total_saldo ts
+
+left join dividas_clientes dc on ts.id_cliente = dc.id_cliente
+
+where ts.saldo > coalesce(dc.dividas,0);
+
+-- 19. Sucesso de Cross-Selling (PJ):
+-- A diretoria quer medir a penetração de múltiplos produtos no segmento corporativo. Identifique os clientes pessoa jurídica (tipo_pessoa = 'PJ') que possuem, simultaneamente,
+--  um contrato ativo de 'Capital de Giro' (qualquer modalidade) E um cartão de crédito emitido.
+
+select distinct c.nome, c.tipo_pessoa, pf.tipo_produto  from clientes c 
+
+join contratos_credito cc on c.id_cliente = cc.id_cliente
+join produtos_financeiros pf on cc.id_produto = pf.id_produto
+join cartoes ct on c.id_cliente = ct.id_cliente
+
+where c.tipo_pessoa = 'PJ'
+and
+pf.tipo_produto = 'Capital de Giro'
+and
+cc.status_contrato = 'Ativo';
+
+
+-- 20. O Efeito Dominó da Inadimplência (Contágio):
+-- Geralmente, o cliente atrasa o cartão antes de atrasar o empréstimo. Identifique os clientes que tiveram uma fatura de cartão classificada como Fechada_Atrasada e que, 
+-- no intervalo de até 45 dias seguintes à data de vencimento dessa fatura, também tiveram uma parcela de contrato de crédito classificada como Atrasada.
+
+with fatura_fechada as (
+select c.id_cliente, c.nome, fc.data_vencimento from clientes c 
+
+join cartoes ct on c.id_cliente = ct.id_cliente
+join faturas_cartao fc on ct.id_cartao = fc.id_cartao
+
+where fc.status_fatura = 'Fechada_Atrasada'
+),
+
+parcela_atrasada as (
+select f.id_cliente, datediff(p.data_vencimento, f.data_vencimento) as dias  from fatura_fechada f
+
+join contratos_credito cc on f.id_cliente = cc.id_cliente
+join parcelas p on cc.id_contrato = p.id_contrato
+
+where p.status_parcela = 'Atrasada' 
+)
+
+select distinct * from parcela_atrasada
+where dias between 0 and 45;
