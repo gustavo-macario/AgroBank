@@ -364,3 +364,183 @@ where p.status_parcela = 'Atrasada'
 
 select distinct * from parcela_atrasada
 where dias between 0 and 45;
+
+-- 21. Evolução de Caixa Intramês (Running Total):
+-- Escolha a conta do cliente "Mariana Souza" (ou ID 2). Usando a tabela de transacoes, crie um relatório que mostre a evolução cronológica do dinheiro dela. 
+-- Exiba a data/hora da transação, o valor da transação (debito subtrai, credito soma) e o saldo acumulado no momento da transação 
+
+select ts.data_hora_transacao, ts.valor,
+sum(
+case when ts.tipo_movimento = 'Credito' then ts.valor
+ when ts.tipo_movimento = 'Debito' then (- ts.valor )
+ else 0 end
+ )
+over (order by ts.data_hora_transacao, ts.id_transacao) as saldo_acumulado
+from clientes c
+
+join contas ct on c.id_cliente = ct.id_cliente 
+join transacoes ts on ct.id_conta = ts.id_conta
+
+where c.id_cliente = 2;
+
+-- 22. Comportamento de Pagamento (Score de Pontualidade):
+-- Para os clientes que já pagaram pelo menos 3 parcelas de empréstimo, calcule a média de dias de atraso ou antecipação.
+-- Se a data_pagamento for menor que o vencimento, é antecipação (número negativo).
+-- Se for maior, é atraso (número positivo).
+-- Liste os clientes ordenando dos mais "pontuais" (ou que antecipam mais) para os mais atrasados.
+
+with dias_parcelas as (
+select c.id_cliente, c.nome, 
+datediff(p.data_pagamento, p.data_vencimento) as dias
+ from clientes c 
+
+join contratos_credito cc on c.id_cliente = cc.id_cliente 
+join parcelas p on cc.id_contrato = p.id_contrato
+
+where p.data_pagamento is not null
+)
+
+select id_cliente, nome,
+round(avg(dias), 2) as media_dias
+from dias_parcelas
+
+group by id_cliente, nome
+having count(*) >= 3
+order by media_dias asc;
+
+
+-- 23. Detecção de Anomalia Transacional (Anti-Fraude Local):
+-- O sistema de prevenção a fraudes quer um alerta de velocidade transacional. Identifique as contas que realizaram 3 ou mais transações de Débito (saídas) na mesma data, 
+-- cujo valor somado dessas saídas no dia ultrapasse 80% do saldo_atual da conta.
+
+with qtde_transacoes as (
+select c.id_conta, c.saldo_atual, ts.valor, substr(data_hora_transacao, 1, 10) as datas,
+count(substr(data_hora_transacao, 1, 10)) over (partition by c.id_conta, substr(data_hora_transacao, 1, 10) order by substr(data_hora_transacao, 1, 10) ) as count_transacoes
+ from contas c
+
+ join transacoes ts on c.id_conta = ts.id_conta
+
+where ts.tipo_movimento = 'Debito'
+)
+
+select id_conta, saldo_atual, datas,
+sum(valor)
+ from qtde_transacoes
+
+where count_transacoes >=3
+
+group by id_conta, saldo_atual, datas
+having sum(valor) > (saldo_atual) * 0.80;
+
+
+-- 24. Segmentação RFM Simplificada (Recência e Frequência):
+-- Vamos classificar o engajamento de uso da conta via PIX/TED recebidos (Transações de 'Credito'). Crie uma query que retorne para cada conta:
+-- Recência: Quantos dias se passaram entre a última transação de crédito e a data de hoje (use uma data fixa de referência, como '2023-11-01', se preferir).
+-- Frequência: O número total de transações de crédito recebidas.
+-- Use a função NTILE(4) para dividir os clientes em 4 grupos de Frequência (1 = menor frequência, 4 = maior frequência).
+
+with ordenando as (
+select c.id_conta, count(ts.id_transacao) as qtde,
+datediff('2023-11-01', max(ts.data_hora_transacao)) as dias_desde_ult_tran
+ from contas c 
+
+join transacoes ts on c.id_conta = ts.id_conta 
+
+where ts.tipo_movimento = 'Credito'
+
+group by c.id_conta
+),
+
+ranqueando as (
+select id_conta, qtde, dias_desde_ult_tran,
+ntile(4) over (order by qtde) as grupos
+
+from ordenando
+)
+
+select id_conta, qtde, dias_desde_ult_tran, grupos,
+case when grupos = 1 then 'menor frequência'
+when grupos = 4 then 'maior frequência'
+else 'neutro'
+end as frenqencia
+ from ranqueando
+order by grupos desc;
+
+-- 25. A "Ressurreição" de Clientes (Win-back):
+-- Definimos um cliente "Ressuscitado" como aquele que ficou mais de 6 meses sem fazer nenhuma movimentação na conta (transacoes), mas que voltou a transacionar no último mês analisado (ex: Outubro/2023).
+--  Escreva uma query para encontrar o intervalo em dias entre transações consecutivas e isolar os clientes que tiveram esse "buraco" maior que 180 dias e retornaram.
+
+with lag_datas as (
+select c.id_cliente, ts.data_hora_transacao,
+lag(ts.data_hora_transacao) over (partition by c.id_cliente order by ts.data_hora_transacao asc) as diffdias
+ from transacoes  ts
+ 
+ join contas ct on ts.id_conta = ct.id_conta
+ join clientes c on ct.id_cliente = c.id_cliente
+),
+
+diferencas_de_dias as (
+select id_cliente, data_hora_transacao, 
+datediff(data_hora_transacao, diffdias) as dias
+from lag_datas
+)
+
+select id_cliente, dias
+from diferencas_de_dias
+where dias > 180 and data_hora_transacao between '2023-10-01' and '2023-10-31';
+
+-- 26. Limpeza de Dados e Deduplicação (O Pesadelo do Sistema):
+-- Imagine que um bug no sistema de mensageria duplicou algumas entradas na tabela de transacoes. Escreva uma query para identificar se existem transações perfeitamente duplicadas
+--  (mesmo id_conta, tipo_movimento, valor e data_hora_transacao). Em seguida, construa uma CTE que retorne apenas uma cópia de cada transação, eliminando as duplicidades, pronta para ser inserida em um Data Lake limpo.
+
+with veriificando_duplicadas as (
+select *, 
+row_number() over (partition by id_conta, tipo_movimento, valor, data_hora_transacao order by id_transacao) as verificando
+from transacoes t
+)
+
+select * from 
+veriificando_duplicadas
+
+where verificando = 1; 
+
+
+-- 27. O Fechamento de Mês (Last Value):
+-- A contabilidade precisa de um "fotografia" do saldo das contas no final de cada mês. Usando a tabela de transacoes, descubra qual foi o último saldo (ou a última movimentação, caso prefira reconstruir o saldo) 
+-- de cada conta no último dia em que ela transacionou dentro de um determinado mês.
+
+with ultima_transacao as (
+select c.id_conta, substr(t.data_hora_transacao, 1, 7) as datas, t.valor, 
+row_number() over (partition by c.id_conta, substr(t.data_hora_transacao, 1, 7) order by t.data_hora_transacao desc) as ordenando 
+ from transacoes t
+ 
+ join contas c on t.id_conta = c.id_conta
+ )
+ 
+ select id_conta, datas, valor
+ from ultima_transacao
+ 
+ where ordenando = 1;
+
+-- 28. Construção de Tabela Fato (Consolidação de Dívidas):
+-- Vamos simular a criação de uma tabela "Fato Inadimplência" unificada. O banco tem dívidas em dois lugares diferentes: parcelas (empréstimos) e faturas_cartao (cartões).
+-- Crie uma query usando UNION ALL que junte as parcelas atrasadas e as faturas atrasadas em uma única visão padronizada com as seguintes colunas:
+-- id_cliente
+-- origem_divida (Escreva 'Emprestimo' ou 'Cartao')
+-- data_vencimento
+-- valor_devido
+-- dias_de_atraso (diferença entre a data de vencimento e a data de hoje).
+
+	select id_cliente, 'Emprestimo' as origem_divida, data_vencimento, valor_principal as valor_devido, datediff(now(), p.data_vencimento) as dias_de_atraso from parcelas p 
+
+	join contratos_credito cc on p.id_contrato = cc.id_contrato
+    
+    where status_parcela = 'Atrasada'
+
+	union all
+
+	select ct.id_cliente,  'Cartao' as origem_divida, data_vencimento, valor_total as valor_devido, datediff(now(), fc.data_vencimento) as dias_de_atraso from faturas_cartao fc 
+
+	join cartoes ct on fc.id_cartao = ct.id_cartao
+
+  where status_fatura = 'Fechada_Atrasada' 
