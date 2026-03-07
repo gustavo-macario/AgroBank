@@ -544,3 +544,58 @@ row_number() over (partition by c.id_conta, substr(t.data_hora_transacao, 1, 7) 
 	join cartoes ct on fc.id_cartao = ct.id_cartao
 
   where status_fatura = 'Fechada_Atrasada' 
+
+
+-- 29. O Problema das "Ilhas" (Gaps & Islands - Clássico de Entrevistas):
+-- Queremos premiar os clientes mais engajados. Identifique os clientes que realizaram transações em dias consecutivos. Sua missão é criar uma flag ou agrupamento que mostre o cliente, a data de início da sequência,
+--  a data de fim da sequência e o número total de dias consecutivos ininterruptos em que ele usou a conta.
+
+with data_transacao as (
+select distinct ts.id_conta, date(data_hora_transacao) as data  from transacoes ts
+),
+
+ordenando as (
+select dt.id_conta, c.id_cliente, c.nome, dt.data,
+dt.data 
+-
+row_number() over (partition by c.id_cliente order by dt.data asc) as conta
+ from data_transacao dt
+
+join contas ct on dt.id_conta = ct.id_conta
+join clientes c on ct.id_cliente = c.id_cliente
+)
+
+select id_cliente, nome,
+min(data) as inicio_sequencia, max(data) as fim_sequencia, count(*) as dias_consecutivos
+from ordenando
+
+group by id_cliente, nome, conta;
+
+
+-- 30. Detecção de Picos de Consumo (Média Móvel com Janela de Tempo):
+-- Para calibrar os modelos de crédito, precisamos identificar transações "fora do padrão" na tabela transacoes. Escreva uma query que avalie cada transação de Débito e a compare com a média de gastos (débitos) 
+-- dessa mesma conta nos 30 dias imediatamente anteriores à data da transação atual. Retorne apenas as transações cujo valor seja 3 vezes maior do que essa média móvel histórica.
+
+with media_contas as (
+select 
+ts.id_conta,
+ts.id_transacao,
+ts.valor,
+date(ts.data_hora_transacao) as data
+from transacoes ts
+where ts.tipo_movimento = 'Debito'
+)
+
+select *
+from (
+select m1.*,
+(
+select avg(m2.valor)
+from media_contas m2
+where m2.id_conta = m1.id_conta
+and m1.data > m2.data
+and m2.data >= m1.data - interval 30 day
+) as media_movel
+from media_contas m1
+) t
+where valor > media_movel * 3;
